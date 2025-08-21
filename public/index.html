@@ -1,0 +1,308 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Call API Demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{
+      --gap: 10px;
+      --pad: 10px;
+      --card-bg: #fff;
+      --muted: #6b7280;
+      --blue: #0366d6;
+    }
+    html,body{height:100%}
+    body{
+      margin:0;
+      height:100vh;
+      overflow:hidden;
+      font-family: system-ui, Arial, sans-serif;
+      background:#f4f6f8;
+      color:#222;
+      font-size:14px;
+    }
+    .app{
+      height:100%;
+      display:grid;
+      grid-template-rows: auto 1fr;
+      gap: var(--gap);
+      padding: var(--pad);
+      box-sizing:border-box;
+    }
+    header{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+    }
+    h1{ font-size:18px; color:var(--blue); margin:0; }
+    .grid{
+      display:grid;
+      grid-template-columns: 360px 1fr;
+      gap: var(--gap);
+      min-height:0;
+    }
+    .card{
+      background:var(--card-bg);
+      border-radius:10px;
+      box-shadow:0 2px 8px rgba(0,0,0,0.06);
+      padding: var(--pad);
+      display:flex;
+      flex-direction:column;
+      min-height:0;
+    }
+    label{display:block;margin:6px 0 4px;font-weight:600}
+    input,select{
+      width:100%; padding:8px;
+      border:1px solid #d1d5db; border-radius:6px;
+      font-size:14px; box-sizing:border-box;
+    }
+    .row{display:flex; gap:8px; margin-top:10px}
+    button{
+      flex:1; padding:9px 10px; border:none; border-radius:6px;
+      color:#fff; cursor:pointer; font-weight:600; font-size:14px;
+      transition: transform .02s ease-in;
+    }
+    button:active{ transform: translateY(1px); }
+    .primary{ background: var(--blue); }
+    .secondary{ background:#9aa3ad; }
+    button:disabled{ background:#cbd5e1 !important; color:#6b7280 !important; cursor:not-allowed }
+    small.mono{font-family: ui-monospace, Consolas, monospace; color:var(--muted)}
+    .panel-title{font-weight:700; color:#374151; margin:0 0 6px 0}
+    pre{
+      margin:0; padding:10px; border-radius:6px; background:#f6f8fa;
+      font-family: ui-monospace, Consolas, monospace;
+      font-size:12px; line-height:1.35;
+      overflow:auto;
+      flex:1;
+      min-height:0;
+      white-space:pre;
+    }
+    .panels{
+      display:grid;
+      grid-template-rows: 1fr 1fr;
+      gap: var(--gap);
+      min-height:0;
+    }
+    .cb-line{margin-top:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <h1>Call API Demo</h1>
+    </header>
+
+    <div class="grid">
+      <!-- Left: Form -->
+      <div class="card">
+        <form id="f" style="display:flex;flex-direction:column;min-height:0">
+          <div>
+            <label>A‑leg extension:</label>
+            <input id="aExt" required placeholder="1000">
+
+            <label>B‑leg number:</label>
+            <input id="bNum" required placeholder="0771234567 or +947...">
+
+            <label>A‑leg tech:</label>
+            <select id="tech">
+              <option value="SIP">SIP</option>
+              <option value="PJSIP">PJSIP</option>
+            </select>
+
+            <label>Dialplan context (optional):</label>
+            <input id="ctx" placeholder="outgoing">
+          </div>
+
+          <div class="row">
+            <button id="btnInit" type="submit" class="secondary" disabled>Initiate Call</button>
+            <button id="btnHangup" type="button" class="secondary" disabled>Hang Up</button>
+          </div>
+
+          <div class="cb-line">
+            <small class="mono">
+              callback_url will be set to: <span id="cbUrlPreview"></span>
+            </small>
+          </div>
+        </form>
+      </div>
+
+      <!-- Right: Panels -->
+      <div class="panels">
+        <div class="card">
+          <div class="panel-title">Live</div>
+          <pre id="status">—</pre>
+        </div>
+        <div class="card">
+          <div class="panel-title">Details</div>
+          <pre id="details">—</pre>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const f = document.getElementById('f');
+    const statusEl = document.getElementById('status');
+    const detailsEl = document.getElementById('details');
+    const cbUrlPreview = document.getElementById('cbUrlPreview');
+    const btnHangup = document.getElementById('btnHangup');
+    const btnInit = document.getElementById('btnInit');
+
+    const CALLBACK_URL = `${window.location.origin}/webhook`;
+    cbUrlPreview.textContent = CALLBACK_URL;
+
+    function log(line) {
+      const prev = statusEl.textContent === '—' ? '' : statusEl.textContent + '\n';
+      statusEl.textContent = prev + line;
+      statusEl.scrollTop = statusEl.scrollHeight;
+    }
+
+    function when(iso) {
+      if (!iso) return null;
+      const d = new Date(iso);
+      return { local: d.toLocaleString(), utc: d.toISOString() };
+    }
+
+    let es = null;
+    let lastCallId = null;
+
+    function setHangupEnabled(on) {
+      btnHangup.disabled = !on;
+      btnHangup.className = on ? 'primary' : 'secondary';
+    }
+
+    function setInitEnabled(on) {
+      btnInit.disabled = !on;
+      btnInit.className = on ? 'primary' : 'secondary';
+    }
+
+    function subscribe(callId) {
+      if (es) es.close();
+      es = new EventSource(`/events?call_id=${encodeURIComponent(callId)}`);
+      es.addEventListener('update', (e) => {
+        const evt = JSON.parse(e.data);
+        const t = evt.type, p = evt.payload || {};
+        if (t === 'call_status') {
+          log(`status: ${p.status}`);
+          if (['completed','not_answered','terminated_by_internal','terminated_by_external','failed'].includes(p.status)) {
+            setHangupEnabled(false);
+            setInitEnabled(true);
+          }
+        }
+        if (t === 'internal_extension_status') log(`ext ${p.extension} is ${p.status}`);
+        if (t === 'external_number_status') log(`B-leg: ${p.status}${p.cause!=null?` (cause ${p.cause})`:''}`);
+
+        if (t === 'call_details') {
+          const a = p.a_leg || {}, b = p.b_leg || {};
+          const r = p.recording || null;
+          const d = {
+            call_id: p.call_id,
+            a_ext: p.a_ext,
+            b_number: p.b_number,
+            ended_by: p.ended_by || null,
+            call_start_time: when(p.call_start_time),
+            call_end_time: when(p.call_end_time),
+            a_leg: {
+              answered_at: when(a.answered_at),
+              ended_at: when(a.ended_at),
+              talk_seconds: a.talk_seconds,
+              hangup_cause: a.hangup_cause ?? null
+            },
+            b_leg: {
+              answered_at: when(b.answered_at),
+              ended_at: when(b.ended_at),
+              talk_seconds: b.talk_seconds,
+              hangup_cause: b.hangup_cause ?? null
+            },
+            recording: r ? { filename: r.filename, date_folder: r.date_folder } : null
+          };
+          detailsEl.textContent = JSON.stringify(d, null, 2);
+          detailsEl.scrollTop = 0;
+          log('completed');
+        }
+      });
+    }
+
+    btnHangup.addEventListener('click', async () => {
+      if (!lastCallId) return;
+      try {
+        log(`POST /api/hangup …`);
+        const r = await fetch('/api/hangup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ call_id: lastCallId })
+        });
+        const j = await r.json().catch(() => ({}));
+        if (!r.ok || j.error) {
+          log('Hangup error: ' + JSON.stringify(j));
+          alert('Hangup failed: ' + (j.error || r.statusText));
+          return;
+        }
+        log(`hangup accepted${j.method?` (method=${j.method})`:''}`);
+        setHangupEnabled(false);
+        setInitEnabled(true);
+      } catch (err) {
+        log('Hangup fetch error: ' + err.message);
+        alert('Network error: ' + err.message);
+      }
+    });
+
+    function checkInputs() {
+      const aExt = document.getElementById('aExt').value.trim();
+      const bNum = document.getElementById('bNum').value.trim();
+      setInitEnabled(Boolean(aExt && bNum));
+    }
+    document.getElementById('aExt').addEventListener('input', checkInputs);
+    document.getElementById('bNum').addEventListener('input', checkInputs);
+
+    f.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      statusEl.textContent = '—';
+      detailsEl.textContent = '—';
+      setHangupEnabled(false);
+      lastCallId = null;
+
+      const aExt = document.getElementById('aExt').value.trim();
+      const bNum = document.getElementById('bNum').value.trim();
+      const tech = document.getElementById('tech').value;
+      const ctx = document.getElementById('ctx').value.trim();
+
+      const body = {
+        a_ext: aExt,
+        b_number: bNum,
+        a_endpoint: `${tech}/${aExt}`,
+        callback_url: CALLBACK_URL
+      };
+      if (ctx) body.out_ctx = ctx;
+
+      log('POST /api/twoleg …');
+      try {
+        const r = await fetch('/api/twoleg', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body)
+        });
+        const j = await r.json();
+        if (!r.ok || !j.ok) {
+          log('Error: ' + JSON.stringify(j));
+          alert('Init failed: ' + (j.error || r.statusText));
+          return;
+        }
+        log(`accepted call_id=${j.call_id} normalized_b=${j.normalized_b}`);
+        lastCallId = j.call_id;
+        setHangupEnabled(true);
+        setInitEnabled(false);
+        subscribe(j.call_id);
+      } catch (err) {
+        log('Fetch error: ' + err.message);
+        alert('Network error: ' + err.message);
+      }
+    });
+
+    // initial state
+    checkInputs();
+  </script>
+</body>
+</html>
+
