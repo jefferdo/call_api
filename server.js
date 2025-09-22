@@ -49,6 +49,9 @@ app.get('/health', (_req, res) => res.json({ ok: true, api_base: API_BASE }));
 app.post('/webhook', (req, res) => {
   const p = req.body?.payload || {};
   addEvent(p.call_id || null, req.body || {});
+  // create new files in ./logs to log raw webhooks. file name should be p.call_id. append mode.
+  require('fs').appendFileSync(`./logs/${p.call_id}.log`, JSON.stringify(req.body) + "\n");
+  
   res.json({ ok: true });
 });
 
